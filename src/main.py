@@ -1,6 +1,3 @@
-"""Message-size experiment harness for the lattice-based SIBPRE scheme."""
-
-import argparse
 import json
 import pickle
 import random
@@ -11,9 +8,8 @@ import time
 from .sibpre import SIBPRE
 
 ASCII_ALPHABET = string.ascii_letters + string.digits
-DEFAULT_MESSAGE_BITS = [16, 32, 64, 128, 256]
-DEFAULT_PARAMS = {'n': 256, 'q': 12289, 'sigma': 3.2}  # ≈80-bit lattice security
-
+DEFAULT_MESSAGE_BITS = [16] #, 32, 64, 128, 256]
+DEFAULT_PARAMS = {'n': 8, 'q': 8191, 'sigma': 0.3}  
 
 def print_table(headers, rows, title=""):
     if not rows:
@@ -29,6 +25,10 @@ def print_table(headers, rows, title=""):
 
 
 def generate_random_message(bit_length, rng=None):
+    """
+    Generate a random ASCII message of given bit length.
+    Ensures the message length is bit_length//8 bytes.
+    """
     if bit_length % 8 != 0:
         raise ValueError("bit_length must be divisible by 8")
     if rng is None:
@@ -74,22 +74,26 @@ def run_message_size_suite(message_bits_list, trials, params, rng=None):
         for _ in range(trials):
             message = generate_random_message(bits, rng=rng)
 
+            # Encrypt
             start = time.perf_counter()
             ciphertext = scheme.Enc(delegator, message)
             timings['encrypt'].append(time.perf_counter() - start)
             sizes['ciphertext'].append(_ciphertext_size(ciphertext))
 
+            # Decrypt (delegator)
             start = time.perf_counter()
             recovered = scheme.Dec(sk_delegator, ciphertext)
             timings['decrypt'].append(time.perf_counter() - start)
             if recovered != message:
                 failures['decrypt'] += 1
 
+            # ReEncrypt
             start = time.perf_counter()
             reenc = scheme.ReEnc(rekey, ciphertext)
             timings['reencrypt'].append(time.perf_counter() - start)
             sizes['reencrypted'].append(_ciphertext_size(reenc))
 
+            # ReDecrypt (delegatee)
             start = time.perf_counter()
             redecrypted = scheme.Dec(sk_delegatee, reenc)
             timings['redecrypt'].append(time.perf_counter() - start)
@@ -159,32 +163,8 @@ def summarise(results):
     print_table(headers, rows, "Message Size Experiment")
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Lattice SIBPRE message-size experiment")
-    parser.add_argument('--trials', type=int, default=1, help='Trials per message size')
-    parser.add_argument('--message-bits', type=int, nargs='*', default=DEFAULT_MESSAGE_BITS,
-                        help='Message sizes (in bits) to benchmark')
-    parser.add_argument('--n', type=int, default=DEFAULT_PARAMS['n'], help='Lattice dimension n')
-    parser.add_argument('--q', type=int, default=DEFAULT_PARAMS['q'], help='Modulus q')
-    parser.add_argument('--sigma', type=float, default=DEFAULT_PARAMS['sigma'], help='Gaussian sigma')
-    parser.add_argument('--seed', type=int, default=None, help='Random seed')
-    parser.add_argument('--output', type=str, default=None, help='Optional JSON output path')
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-    rng = random.Random(args.seed) if args.seed is not None else random
-
-    params = {'n': args.n, 'q': args.q, 'sigma': args.sigma}
-    results = run_message_size_suite(args.message_bits, args.trials, params, rng=rng)
-    summarise(results)
-
-    if args.output:
-        with open(args.output, 'w', encoding='utf-8') as handle:
-            json.dump(results, handle, indent=2)
-        print(f"\nRaw results written to {args.output}")
-
-
 if __name__ == '__main__':
-    main()
+    rng = random.Random(42)
+    params = DEFAULT_PARAMS
+    results = run_message_size_suite(DEFAULT_MESSAGE_BITS, trials=5, params=params, rng=rng)
+    summarise(results)
