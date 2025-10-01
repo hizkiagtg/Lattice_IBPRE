@@ -22,6 +22,14 @@ def test_extract_solution():
     assert (A_id * sk) % scheme.q == u
 
 
+def test_sampleo_matches_extract_equation():
+    scheme = _build_scheme()
+    u = scheme.PP[1]
+    x_mod, _ = scheme.SampleO("alice@example.com", u)
+    A_id, _ = scheme.matrix_for_identity("alice@example.com")
+    assert (A_id * x_mod) % scheme.q == u
+
+
 def test_encrypt_decrypt_roundtrip():
     scheme = _build_scheme()
     identity = "alice@example.com"

@@ -1,38 +1,31 @@
-"""Experimental harness for the lattice-based SIBPRE scheme.
-
-The script follows the research methodology described in Chapter 3 by
-providing:
-
-1. Message-size experiments (Section 3.4.1) covering payloads of
-   16, 32, 64, 128, and 256 bits via AES-GCM hybrid encryption.
-2. Parameter-variation experiments (Section 3.4.2) across tunable
-   lattice parameters (n, q, sigma).
-
-Usage:
-    python -m Lattice_IBPRE.src.main --experiment message --trials 5
-    python -m Lattice_IBPRE.src.main --experiment params
-    python -m Lattice_IBPRE.src.main --experiment all --output results.json
-
-The script prints summaries to stdout and optionally stores raw metrics
-in JSON for downstream analysis (Section 3.6).
-"""
+"""Message-size experiment harness for the lattice-based SIBPRE scheme."""
 
 import argparse
-import itertools
 import json
 import pickle
 import random
 import statistics
 import string
 import time
-from collections import defaultdict
 
 from .sibpre import SIBPRE
 
-# ---------------------------------------------------------------------------
-# Message generation helpers (Section 3.3.2, hybrid AES-GCM payloads)
-# ---------------------------------------------------------------------------
 ASCII_ALPHABET = string.ascii_letters + string.digits
+DEFAULT_MESSAGE_BITS = [16, 32, 64, 128, 256]
+DEFAULT_PARAMS = {'n': 256, 'q': 12289, 'sigma': 3.2}  # ≈80-bit lattice security
+
+
+def print_table(headers, rows, title=""):
+    if not rows:
+        return
+    widths = [max(len(str(item)) for item in col) for col in zip(headers, *rows)]
+    if title:
+        print(f"\n--- {title} ---")
+    header_line = " | ".join(f"{h:<{w}}" for h, w in zip(headers, widths))
+    print(header_line)
+    print("-" * len(header_line))
+    for row in rows:
+        print(" | ".join(f"{str(item):<{w}}" for item, w in zip(row, widths)))
 
 
 def generate_random_message(bit_length, rng=None):
@@ -40,7 +33,7 @@ def generate_random_message(bit_length, rng=None):
         raise ValueError("bit_length must be divisible by 8")
     if rng is None:
         rng = random
-    byte_length = bit_length // 8
+    byte_length = max(1, bit_length // 8)
     return ''.join(rng.choice(ASCII_ALPHABET) for _ in range(byte_length))
 
 
@@ -48,278 +41,148 @@ def sizeof(obj):
     return len(pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
 
 
-def time_call(fn, *args, **kwargs):
-    start = time.perf_counter()
-    result = fn(*args, **kwargs)
-    elapsed = time.perf_counter() - start
-    return elapsed, result
+def _ciphertext_size(ciphertext):
+    return sizeof(ciphertext)
 
 
-# ---------------------------------------------------------------------------
-# Experiment 1: Message-size overhead (Section 3.4.1)
-# ---------------------------------------------------------------------------
-
-def run_message_size_experiment(message_bits, trials, scheme_params, rng=None):
+def run_message_size_suite(message_bits_list, trials, params, rng=None):
     if rng is None:
         rng = random
 
-    results = {
-        'parameters': {
-            'n': scheme_params['n'],
-            'q': scheme_params['q'],
-            'sigma': scheme_params['sigma'],
-        },
-        'message_bits': message_bits,
-        'trials': trials,
-        'timings': defaultdict(list),
-        'sizes': defaultdict(list),
+    setup_start = time.perf_counter()
+    scheme = SIBPRE(n=params['n'], q=params['q'], sigma=params['sigma'])
+    setup_time_ms = (time.perf_counter() - setup_start) * 1000
+    delegator = "alice@example.com"
+    delegatee = "bob@example.com"
+
+    extract_start = time.perf_counter()
+    sk_delegator = scheme.Extract(delegator)
+    sk_delegatee = scheme.Extract(delegatee)
+    keygen_time_ms = (time.perf_counter() - extract_start) * 1000
+
+    rk_start = time.perf_counter()
+    rekey = scheme.ReKeyGen(sk_delegator, delegator, delegatee)
+    rekey_time_ms = (time.perf_counter() - rk_start) * 1000
+
+    message_results = {}
+
+    for bits in message_bits_list:
+        timings = {'encrypt': [], 'decrypt': [], 'reencrypt': [], 'redecrypt': []}
+        sizes = {'ciphertext': [], 'reencrypted': []}
+        failures = {'decrypt': 0, 'redecrypt': 0}
+
+        for _ in range(trials):
+            message = generate_random_message(bits, rng=rng)
+
+            start = time.perf_counter()
+            ciphertext = scheme.Enc(delegator, message)
+            timings['encrypt'].append(time.perf_counter() - start)
+            sizes['ciphertext'].append(_ciphertext_size(ciphertext))
+
+            start = time.perf_counter()
+            recovered = scheme.Dec(sk_delegator, ciphertext)
+            timings['decrypt'].append(time.perf_counter() - start)
+            if recovered != message:
+                failures['decrypt'] += 1
+
+            start = time.perf_counter()
+            reenc = scheme.ReEnc(rekey, ciphertext)
+            timings['reencrypt'].append(time.perf_counter() - start)
+            sizes['reencrypted'].append(_ciphertext_size(reenc))
+
+            start = time.perf_counter()
+            redecrypted = scheme.Dec(sk_delegatee, reenc)
+            timings['redecrypt'].append(time.perf_counter() - start)
+            if redecrypted != message:
+                failures['redecrypt'] += 1
+
+        message_results[bits] = {
+            'timings_ms': {name: statistics.mean(values) * 1000 for name, values in timings.items()},
+            'sizes_bytes': {name: statistics.mean(values) for name, values in sizes.items()},
+            'failures': failures,
+        }
+
+    return {
+        'params': params,
+        'num_trials': trials,
+        'setup_time_ms': setup_time_ms,
+        'keygen_time_ms': keygen_time_ms,
+        'rekey_time_ms': rekey_time_ms,
+        'message_results': message_results,
     }
 
-    setup_time, scheme = time_call(
-        SIBPRE,
-        n=scheme_params['n'],
-        q=scheme_params['q'],
-        sigma=scheme_params['sigma'],
+
+def summarise(results):
+    if not results:
+        print("No data collected.")
+        return
+
+    params = results['params']
+    print(
+        f"\nRunning message-size experiment on lattice parameters "
+        f"n={params['n']}, q={params['q']}, sigma={params['sigma']} "
+        f"with {results['num_trials']} trials per payload..."
     )
-    results['timings']['setup'].append(setup_time)
 
-    identities = {
-        'delegator': 'alice@example.com',
-        'delegatee': 'bob@example.com',
-    }
-
-    t_extract, sk_delegator = time_call(scheme.Extract, identities['delegator'])
-    results['timings']['extract'].append(t_extract)
-    t_extract_bob, sk_delegatee = time_call(scheme.Extract, identities['delegatee'])
-    results['timings']['extract'].append(t_extract_bob)
-
-    t_rk, rekey = time_call(
-        scheme.ReKeyGen,
-        sk_delegator,
-        identities['delegator'],
-        identities['delegatee'],
+    print(
+        f"\nParameters: n={params['n']}, q={params['q']}, sigma={params['sigma']}"
     )
-    results['timings']['rkgen'].append(t_rk)
-    results['sizes']['secret_key'].append(sizeof(sk_delegator))
-    results['sizes']['rekey'].append(sizeof(rekey))
+    print(
+        f"Setup: {results['setup_time_ms']:.2f} ms | KeyGen: {results['keygen_time_ms']:.2f} ms | "
+        f"ReKeyGen: {results['rekey_time_ms']:.2f} ms"
+    )
 
-    for _ in range(trials):
-        message = generate_random_message(message_bits, rng=rng)
+    headers = [
+        "Message bits",
+        "Enc (ms)",
+        "Dec (ms)",
+        "ReEnc (ms)",
+        "ReDec (ms)",
+        "CT (bytes)",
+        "ReCT (bytes)",
+    ]
+    rows = []
+    for bits in sorted(results['message_results']):
+        data = results['message_results'][bits]
+        timings = data['timings_ms']
+        sizes = data['sizes_bytes']
+        rows.append([
+            bits,
+            f"{timings['encrypt']:.3f}",
+            f"{timings['decrypt']:.3f}",
+            f"{timings['reencrypt']:.3f}",
+            f"{timings['redecrypt']:.3f}",
+            f"{sizes['ciphertext']:.1f}",
+            f"{sizes['reencrypted']:.1f}",
+        ])
 
-        t_enc, ciphertext = time_call(scheme.Enc, identities['delegator'], message)
-        results['timings']['encrypt'].append(t_enc)
-        results['sizes']['ciphertext'].append(sizeof(ciphertext))
+    print_table(headers, rows, "Message Size Experiment")
 
-        t_dec, recovered = time_call(scheme.Dec, sk_delegator, ciphertext)
-        results['timings']['decrypt'].append(t_dec)
-        results['correct_decrypt'] = True if recovered == message else False
-
-        t_reenc, reenc_ct = time_call(scheme.ReEnc, rekey, ciphertext)
-        results['timings']['reencrypt'].append(t_reenc)
-        results['sizes']['reencrypted'].append(sizeof(reenc_ct))
-
-        t_redec, redec_message = time_call(scheme.Dec, sk_delegatee, reenc_ct)
-        results['timings']['redecrypt'].append(t_redec)
-        results['correct_redecrypt'] = True if redec_message == message else False
-
-    results['timings'] = {k: list(v) for k, v in results['timings'].items()}
-    results['sizes'] = {k: list(v) for k, v in results['sizes'].items()}
-    return results
-
-
-def summarise_message_experiments(records):
-    summary = []
-    for record in records:
-        row = {
-            'message_bits': record['message_bits'],
-            'n': record['parameters']['n'],
-            'q': record['parameters']['q'],
-            'sigma': record['parameters']['sigma'],
-            'ciphertext_bytes_avg': statistics.mean(record['sizes']['ciphertext']) if record['sizes']['ciphertext'] else 0,
-            'reencrypted_bytes_avg': statistics.mean(record['sizes']['reencrypted']) if record['sizes']['reencrypted'] else 0,
-            'encrypt_ms_avg': statistics.mean(record['timings']['encrypt']) * 1000,
-            'decrypt_ms_avg': statistics.mean(record['timings']['decrypt']) * 1000,
-            'reedec_ms_avg': statistics.mean(record['timings']['redecrypt']) * 1000,
-        }
-        summary.append(row)
-    return summary
-
-
-# ---------------------------------------------------------------------------
-# Experiment 2: Parameter variation (Section 3.4.2)
-# ---------------------------------------------------------------------------
-
-def run_parameter_variation(grid, message_bits, trials, rng=None):
-    if rng is None:
-        rng = random
-
-    records = []
-    for n, q, sigma in itertools.product(grid['n'], grid['q'], grid['sigma']):
-        params = {'n': n, 'q': q, 'sigma': sigma}
-        try:
-            record = run_message_size_experiment(
-                message_bits=message_bits,
-                trials=trials,
-                scheme_params=params,
-                rng=rng,
-            )
-            record['status'] = 'success'
-        except Exception as exc:  # noqa: BLE001 - we need to log all failures
-            record = {
-                'parameters': params,
-                'message_bits': message_bits,
-                'trials': 0,
-                'timings': {},
-                'sizes': {},
-                'status': 'failed',
-                'error': str(exc),
-            }
-        records.append(record)
-    return records
-
-
-def summarise_parameter_variation(records):
-    summary = []
-    for record in records:
-        entry = {
-            'n': record['parameters']['n'],
-            'q': record['parameters']['q'],
-            'sigma': record['parameters']['sigma'],
-            'status': record.get('status', 'unknown'),
-        }
-        if record.get('status') == 'success':
-            encrypt_times = record['timings'].get('encrypt', [])
-            if encrypt_times:
-                entry['encrypt_ms_avg'] = statistics.mean(encrypt_times) * 1000
-            ct_sizes = record['sizes'].get('ciphertext', [])
-            if ct_sizes:
-                entry['ciphertext_bytes_avg'] = statistics.mean(ct_sizes)
-        else:
-            entry['error'] = record.get('error')
-        summary.append(entry)
-    return summary
-
-
-# ---------------------------------------------------------------------------
-# CLI wiring (Section 3.1 workflow orchestration)
-# ---------------------------------------------------------------------------
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="SIBPRE experimental harness")
-    parser.add_argument(
-        '--experiment',
-        choices={'message', 'params', 'all'},
-        default='all',
-        help='Select which experiment to run',
-    )
-    parser.add_argument(
-        '--trials',
-        type=int,
-        default=10,
-        help='Number of trials per configuration',
-    )
-    parser.add_argument(
-        '--message-bits',
-        type=int,
-        nargs='*',
-        default=[16, 32, 64, 128, 256],
-        help='Payload sizes (in bits) for the message experiment',
-    )
-    parser.add_argument(
-        '--variation-message-bits',
-        type=int,
-        default=16,
-        help='Payload size (in bits) for the parameter grid experiment',
-    )
-    parser.add_argument(
-        '--n',
-        type=int,
-        nargs='*',
-        default=[8, 12, 16],
-        help='Candidate lattice dimensions for parameter variation',
-    )
-    parser.add_argument(
-        '--q',
-        type=int,
-        nargs='*',
-        default=[8191, 16381, 32771],
-        help='Candidate moduli for parameter variation (prefer primes)',
-    )
-    parser.add_argument(
-        '--sigma',
-        type=float,
-        nargs='*',
-        default=[0.3, 0.5, 0.8],
-        help='Candidate Gaussian widths for parameter variation',
-    )
-    parser.add_argument(
-        '--seed',
-        type=int,
-        default=None,
-        help='Seed RNG for reproducible experiments',
-    )
-    parser.add_argument(
-        '--output',
-        type=str,
-        default=None,
-        help='Optional path to store raw experiment results as JSON',
-    )
+    parser = argparse.ArgumentParser(description="Lattice SIBPRE message-size experiment")
+    parser.add_argument('--trials', type=int, default=1, help='Trials per message size')
+    parser.add_argument('--message-bits', type=int, nargs='*', default=DEFAULT_MESSAGE_BITS,
+                        help='Message sizes (in bits) to benchmark')
+    parser.add_argument('--n', type=int, default=DEFAULT_PARAMS['n'], help='Lattice dimension n')
+    parser.add_argument('--q', type=int, default=DEFAULT_PARAMS['q'], help='Modulus q')
+    parser.add_argument('--sigma', type=float, default=DEFAULT_PARAMS['sigma'], help='Gaussian sigma')
+    parser.add_argument('--seed', type=int, default=None, help='Random seed')
+    parser.add_argument('--output', type=str, default=None, help='Optional JSON output path')
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     rng = random.Random(args.seed) if args.seed is not None else random
-    raw_results = {}
 
-    if args.experiment in {'message', 'all'}:
-        message_records = []
-        for bits in args.message_bits:
-            params = {'n': 10, 'q': 65537, 'sigma': 0.5}
-            record = run_message_size_experiment(
-                message_bits=bits,
-                trials=args.trials,
-                scheme_params=params,
-                rng=rng,
-            )
-            message_records.append(record)
-        raw_results['message_experiment'] = message_records
-
-        summary = summarise_message_experiments(message_records)
-        print("\n=== Message Size Experiment (Section 3.4.1) ===")
-        for row in summary:
-            print(
-                f"bits={row['message_bits']:>3} | encrypt={row['encrypt_ms_avg']:.3f} ms | "
-                f"decrypt={row['decrypt_ms_avg']:.3f} ms | redecrypt={row['reedec_ms_avg']:.3f} ms | "
-                f"CT≈{row['ciphertext_bytes_avg']:.1f} B | CT_re≈{row['reencrypted_bytes_avg']:.1f} B"
-            )
-
-    if args.experiment in {'params', 'all'}:
-        grid = {'n': args.n, 'q': args.q, 'sigma': args.sigma}
-        param_records = run_parameter_variation(
-            grid=grid,
-            message_bits=args.variation_message_bits,
-            trials=args.trials,
-            rng=rng,
-        )
-        raw_results['parameter_variation'] = param_records
-
-        summary = summarise_parameter_variation(param_records)
-        print("\n=== Parameter Variation Experiment (Section 3.4.2) ===")
-        for entry in summary:
-            if entry.get('status') == 'success':
-                print(
-                    f"n={entry['n']:>3}, q={entry['q']:>6}, sigma={entry['sigma']:.2f} | "
-                    f"encrypt={entry['encrypt_ms_avg']:.3f} ms | CT≈{entry['ciphertext_bytes_avg']:.1f} B"
-                )
-            else:
-                print(
-                    f"n={entry['n']:>3}, q={entry['q']:>6}, sigma={entry['sigma']:.2f} | FAILED: {entry['error']}"
-                )
+    params = {'n': args.n, 'q': args.q, 'sigma': args.sigma}
+    results = run_message_size_suite(args.message_bits, args.trials, params, rng=rng)
+    summarise(results)
 
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as handle:
-            json.dump(raw_results, handle, indent=2)
+            json.dump(results, handle, indent=2)
         print(f"\nRaw results written to {args.output}")
 
 

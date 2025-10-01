@@ -102,24 +102,50 @@ def trap_gen(n, q, m_bar=None, k=None, gaussian_sigma=3.0):
     }
 
 
+def _ensure_mod_matrix(R_int, q):
+    """Return the mod-q reduction of an integer matrix."""
+    Zq = Zmod(q)
+    return Matrix(Zq, R_int.nrows(), R_int.ncols(), lambda i, j: Zq(Integer(R_int[i, j]) % q))
+
+
+def _gaussian_sample_w(dimension, sigma):
+    sigma_eff = max(float(sigma), 1.0)
+    return discrete_gaussian_vector(dimension, sigma_eff)
+
+
 def sample_preimage(A_bar, R_int, G, u, q, sigma, R_mod=None, H=None):
-    """Compute a lattice preimage solving [A_bar | *] * x = u (mod q)."""  # noqa: E501
+    """Sample a short preimage x of u under A_id using the MP12 trapdoor."""
     Zq = Zmod(q)
     if R_mod is None:
-        R_mod = Matrix(Zq, R_int.nrows(), R_int.ncols(), lambda i, j: Zq(R_int[i, j] % q))
+        R_mod = _ensure_mod_matrix(R_int, q)
 
     if H is None:
-        effective_right = (A_bar * R_mod + G) % q
+        H_effective = Matrix(Zq, G.nrows(), G.nrows(), lambda i, j: Zq(1 if i == j else 0))
     else:
-        effective_right = (A_bar * R_mod + H * G) % q
+        H_effective = Matrix(Zq, H)
 
-    A_full = A_bar.augment(effective_right)
-    solution = A_full.solve_right(u)
-    if solution is None:
-        raise ValueError("No preimage found for the given vector")
+    G_effective = (H_effective * G) % q
 
-    x_concat_mod = vector(Zq, solution)
-    x_concat_int = vector(ZZ, [Integer(coeff) for coeff in solution])
+    w = G.ncols()
+    y_int = _gaussian_sample_w(w, sigma)
+    y_mod = vector(Zq, [Zq(Integer(entry) % q) for entry in y_int])
+
+    target = (u - G_effective * y_mod) % q
+
+    try:
+        x0_sol_mod = vector(Zq, A_bar.solve_right(target))
+    except ValueError as exc:
+        raise ValueError("No modular preimage found for the given target") from exc
+
+    x0_sol_int = lift_to_signed(x0_sol_mod, q)
+
+    correction = R_int * y_int
+    x0_int = x0_sol_int - correction
+
+    x0_mod = (x0_sol_mod - R_mod * y_mod) % q
+
+    x_concat_mod = vector(Zq, list(x0_mod) + list(y_mod))
+    x_concat_int = vector(ZZ, list(x0_int) + list(y_int))
     return x_concat_mod, x_concat_int
 
 

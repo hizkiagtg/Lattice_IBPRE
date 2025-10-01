@@ -54,9 +54,7 @@ class SIBPRE:
         master_secret = {'R_int': self.R_int, 'R_mod': self.R_mod}
         return public_params, master_secret
 
-    # ------------------------------------------------------------------
-    # Helper utilities
-    # ------------------------------------------------------------------
+    
     def string_to_vector(self, id_str):
         hash_obj = hashlib.sha256(id_str.encode('utf-8'))
         hash_int = int.from_bytes(hash_obj.digest(), byteorder='big')
@@ -93,22 +91,31 @@ class SIBPRE:
         A_id = block_matrix(self.Zq, [[self.A_bar, second_block]])
         return A_id, H_id
 
-    # ------------------------------------------------------------------
-    # Key algorithms
-    # ------------------------------------------------------------------
-    def Extract(self, identity):
-        A_id, H_id = self.matrix_for_identity(identity)
-        _, u = self.PP
-        sk_mod, _ = sample_preimage(
+    def SampleD(self, H_matrix, u_vector, sigma=None):
+        """Sample a short preimage for identity-specific matrices."""
+        sigma_eff = sigma or self.sample_sigma
+        x_mod, x_int = sample_preimage(
             self.A_bar,
             self.R_int,
             self.G,
-            u,
+            u_vector,
             self.q,
-            self.sample_sigma,
+            sigma_eff,
             R_mod=self.R_mod,
-            H=H_id,
+            H=H_matrix,
         )
+        return x_mod, x_int
+
+    def SampleO(self, identity, u_vector, sigma=None):
+        """Convenience wrapper following MP12 SampleO without random oracles."""
+        H_id = self.FRD(identity)
+        return self.SampleD(H_id, u_vector, sigma=sigma)
+
+
+    def Extract(self, identity):
+        A_id, H_id = self.matrix_for_identity(identity)
+        _, u = self.PP
+        sk_mod, _ = self.SampleD(H_id, u)
         return sk_mod
 
     def Enc(self, identity, message):
@@ -206,9 +213,7 @@ class SIBPRE:
             'tag': ciphertext['tag'],
         }
 
-    # ------------------------------------------------------------------
-    # AES helpers for experimenting with message sizes
-    # ------------------------------------------------------------------
+
     def aes_encrypt(self, plaintext, key=None, nonce=None):
         if key is None:
             key = os.urandom(16)
