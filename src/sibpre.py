@@ -18,7 +18,7 @@ class SIBPRE:
     """
     SIBPRE (Selective/Strongly Identity-Based Proxy Re-Encryption) — lattice variant.
     This version uses a faster sampling path and a hybrid KEM/DEM:
-      - KEM: LWE encrypts a random 128-bit AES key (always 16 bytes).
+      - KEM: LWE encrypts a random 32-bit AES key seed (always 4 bytes, repeated to 16 bytes for AES).
       - DEM: AES-GCM with PKCS#7 padding handles arbitrary-length messages.
     """
 
@@ -201,14 +201,15 @@ class SIBPRE:
     def Enc(self, identity, message):
         """
         Hybrid encryption:
-          1) Generate random 128-bit AES key.
-          2) Encrypt arbitrary-length message (bytes or UTF-8 str) with AES-GCM (+PKCS#7).
-          3) LWE-encrypt the AES key bits (length fixed to 128).
+          1) Generate random 32-bit AES key seed.
+          2) Repeat seed to 16 bytes for AES.
+          3) Encrypt arbitrary-length message (bytes or UTF-8 str) with AES-GCM (+PKCS#7).
+          4) LWE-encrypt the 32-bit seed bits (length fixed to 32).
         """
-        # (1) 128-bit AES key 
-        aes_key = os.urandom(16)
-        key_int = int.from_bytes(aes_key, "big")
-        key_bits = [int(b) for b in format(key_int, "0128b")]
+        # (1) 32-bit AES key seed 
+        aes_key_seed = os.urandom(4)
+        key_int = int.from_bytes(aes_key_seed, "big")
+        key_bits = [int(b) for b in format(key_int, "032b")]
 
         # (2) Build identity-specific A_id
         A, u = self.PP
@@ -246,7 +247,8 @@ class SIBPRE:
             raise TypeError("Message must be str or bytes")
 
         padded = self._pkcs7_pad(msg_bytes)
-        _, nonce, enc_msg, tag = self.aes_encrypt(padded, key=aes_key)
+        aes_key_full = aes_key_seed * 4  # Repeat to 16 bytes for AES
+        _, nonce, enc_msg, tag = self.aes_encrypt(padded, key=aes_key_full)
 
         return {
             "key_ct": key_ct,
@@ -257,7 +259,7 @@ class SIBPRE:
 
     def Dec(self, sk_identity, ciphertext):
         """
-        Reconstruct the 128-bit AES key from LWE key_ct, then AES-GCM decrypt and unpad.
+        Reconstruct the 32-bit AES key seed from LWE key_ct, repeat to 16 bytes, then AES-GCM decrypt and unpad.
         """
         bits = []
         for c1, c2 in ciphertext["key_ct"]:
@@ -269,10 +271,11 @@ class SIBPRE:
             bits.append(bit)
 
         key_int = int("".join(map(str, bits)), 2)
-        aes_key = key_int.to_bytes(16, "big")
+        aes_key_seed = key_int.to_bytes(4, "big")
+        aes_key_full = aes_key_seed * 4  # Repeat to 16 bytes for AES
 
         padded = self.aes_decrypt(
-            aes_key,
+            aes_key_full,
             ciphertext["nonce"],
             ciphertext["enc_msg"],
             ciphertext["tag"],

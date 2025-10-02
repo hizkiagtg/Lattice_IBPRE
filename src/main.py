@@ -8,7 +8,7 @@ import time
 from .sibpre import SIBPRE
 
 ASCII_ALPHABET = string.ascii_letters + string.digits
-DEFAULT_MESSAGE_BITS = [16] #, 32, 64, 128, 256]
+DEFAULT_MESSAGE_BITS = [16, 32, 64, 128, 256]
 DEFAULT_PARAMS = {'n': 8, 'q': 8191, 'sigma': 0.3}  
 
 def print_table(headers, rows, title=""):

@@ -46,7 +46,6 @@ def test_frd_full_rank_difference():
     H_alice = scheme.FRD("alice@example.com")
     H_bob = scheme.FRD("bob@example.com")
     diff = (H_alice - H_bob) % scheme.q
-    # property: difference should be full rank
     assert diff.rank() == scheme.n
 
 
