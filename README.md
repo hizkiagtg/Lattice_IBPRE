@@ -96,3 +96,30 @@ timing/size data from a new experiment, pass it via `timing_data`/`size_data` (o
 recomputing them live. The full 18-configuration sweep is computationally heavy;
 adjust `iterations` or `parameter_grid` if you only need a subset while
 prototyping.
+
+---
+
+## Check Security Parameters with the LWE Estimator
+
+The image bundles the `lattice-estimator` (a.k.a. lwe-estimator) package
+(vendored from the GitHub archive). Run the Sage helper below to estimate the
+best known attack against a given `(n, q, sigma)` tuple:
+
+```
+docker run --rm --entrypoint sage sibpre-app \
+  -python -m Lattice_IBPRE.src.lwe_estimator_runner \
+  --n 10 --q 65537 --sigma 0.5 --secret-distribution unif --json
+```
+
+Without Docker, clone the estimator repo and add it to `PYTHONPATH`, then invoke
+the helper from a Sage environment on the host:
+
+```
+git clone https://github.com/malb/lattice-estimator /opt/lattice-estimator
+export PYTHONPATH=$PYTHONPATH:/opt/lattice-estimator
+sage -python -m Lattice_IBPRE.src.lwe_estimator_runner \
+  --n 10 --q 65537 --sigma 0.5 --secret-distribution ternary
+```
+
+The script prints `alpha = sigma / q`, the raw estimator output, and (with
+`--json`) a machine-readable summary to compare parameter choices.
