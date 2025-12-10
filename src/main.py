@@ -255,8 +255,8 @@ if __name__ == '__main__':
     rng = random.Random(42)
     params = DEFAULT_PARAMS
     # TODO: Uncomment this to see the result of message size variation
-    # results = run_message_size_suite(DEFAULT_MESSAGE_BITS, trials=5, params=params, rng=rng)
-    # summarise(results)
+    results = run_message_size_suite(DEFAULT_MESSAGE_BITS, trials=5, params=params, rng=rng)
+    summarise(results)
 
     tuning_results = run_parameter_tuning_suite()
     summarise_parameter_tuning(tuning_results)
